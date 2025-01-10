@@ -11,17 +11,18 @@ try:
     from StringIO import StringIO
 except ImportError:
     from io import StringIO
-try:
-    from unittest import mock
-except ImportError:
-    import mock
+
+from pathlib import Path
+
+from unittest import mock
 
 import unittest
 
 import rollbar
-from rollbar.lib import python_major_version, string_types
+from rollbar.lib import string_types
 
 from rollbar.test import BaseTest
+from rollbar.test.utils import get_public_attrs
 
 try:
     eval("""
@@ -175,6 +176,7 @@ class RollbarTest(BaseTest):
         body = b'body body body'
         scope = {
             'type': 'http',
+            'client': ('127.0.0.1', 1453),
             'headers': [
                 (b'content-type', b'text/html'),
                 (b'content-length', str(len(body)).encode('latin-1')),
@@ -412,7 +414,7 @@ class RollbarTest(BaseTest):
         def root(starlette_request):
             current_request = rollbar.get_request()
 
-            self.assertEqual(current_request, starlette_request)
+            self.assertEqual(get_public_attrs(current_request), get_public_attrs(starlette_request))
 
             return PlainTextResponse("bye bye")
 
@@ -439,7 +441,7 @@ class RollbarTest(BaseTest):
         def root(starlette_request):
             current_request = rollbar.get_request()
 
-            self.assertEqual(current_request, starlette_request)
+            self.assertEqual(get_public_attrs(current_request), get_public_attrs(starlette_request))
 
             return PlainTextResponse("bye bye")
 
@@ -463,21 +465,11 @@ class RollbarTest(BaseTest):
         app = FastAPI()
         app.add_middleware(ReporterMiddleware)
 
-        # Inject annotations and decorate endpoint dynamically
-        # to avoid SyntaxError for older Python
-        #
-        # This is the code we'd use if we had not loaded the test file on Python 2.
-        #
-        # @app.get('/{param}')
-        # def root(param, fastapi_request: Request):
-        #     current_request = rollbar.get_request()
-        #
-        #     self.assertEqual(current_request, fastapi_request)
-
-        def root(param, fastapi_request):
+        @app.get('/{param}')
+        def root(param, fastapi_request: Request):
             current_request = rollbar.get_request()
 
-            self.assertEqual(current_request, fastapi_request)
+            self.assertEqual(get_public_attrs(current_request), get_public_attrs(fastapi_request))
 
         root = fastapi_add_route_with_request_param(
             app, root, '/{param}', 'fastapi_request'
@@ -500,21 +492,11 @@ class RollbarTest(BaseTest):
         app = FastAPI()
         app.add_middleware(ReporterMiddleware)
 
-        # Inject annotations and decorate endpoint dynamically
-        # to avoid SyntaxError for older Python
-        #
-        # This is the code we'd use if we had not loaded the test file on Python 2.
-        #
-        # @app.get('/{param}')
-        # def root(fastapi_request: Request):
-        #     current_request = rollbar.get_request()
-        #
-        #     self.assertEqual(current_request, fastapi_request)
-
-        def root(param, fastapi_request):
+        @app.get('/{param}')
+        def root(fastapi_request: Request):
             current_request = rollbar.get_request()
 
-            self.assertEqual(current_request, fastapi_request)
+            self.assertEqual(get_public_attrs(current_request), get_public_attrs(fastapi_request))
 
         root = fastapi_add_route_with_request_param(
             app, root, '/{param}', 'fastapi_request'
@@ -541,21 +523,11 @@ class RollbarTest(BaseTest):
         app = FastAPI()
         rollbar_add_to(app)
 
-        # Inject annotations and decorate endpoint dynamically
-        # to avoid SyntaxError for older Python
-        #
-        # This is the code we'd use if we had not loaded the test file on Python 2.
-        #
-        # @app.get('/{param}')
-        # def root(fastapi_request: Request):
-        #     current_request = rollbar.get_request()
-        #
-        #     self.assertEqual(current_request, fastapi_request)
-
-        def root(param, fastapi_request):
+        @app.get('/{param}')
+        def root(fastapi_request: Request):
             current_request = rollbar.get_request()
 
-            self.assertEqual(current_request, fastapi_request)
+            self.assertEqual(get_public_attrs(current_request), get_public_attrs(fastapi_request))
 
         root = fastapi_add_route_with_request_param(
             app, root, '/{param}', 'fastapi_request'
@@ -1472,8 +1444,7 @@ class RollbarTest(BaseTest):
         self.assertRegex(payload['data']['body']['trace']['frames'][-1]['locals']['Password'], r'\*+')
         self.assertIn('_invalid', payload['data']['body']['trace']['frames'][-1]['locals'])
 
-        binary_type_name = 'str' if python_major_version() < 3 else 'bytes'
-        undecodable_message = '<Undecodable type:(%s) base64:(%s)>' % (binary_type_name, base64.b64encode(invalid).decode('ascii'))
+        undecodable_message = '<Undecodable type:(%s) base64:(%s)>' % ('bytes', base64.b64encode(invalid).decode('ascii'))
         self.assertEqual(undecodable_message, payload['data']['body']['trace']['frames'][-1]['locals']['_invalid'])
 
     @mock.patch('rollbar.send_payload')
@@ -1584,7 +1555,7 @@ class RollbarTest(BaseTest):
 
         self.assertEqual(1, len(payload['data']['body']['trace']['frames'][-1]['argspec']))
         self.assertEqual('large', payload['data']['body']['trace']['frames'][-1]['argspec'][0])
-        self.assertEqual("'###############################################...################################################'",
+        self.assertEqual("################################################...#################################################",
                          payload['data']['body']['trace']['frames'][-1]['locals']['large'])
 
     @mock.patch('rollbar.send_payload')
@@ -1615,12 +1586,12 @@ class RollbarTest(BaseTest):
 
         self.assertEqual('large', payload['data']['body']['trace']['frames'][-1]['argspec'][0])
         self.assertTrue(
-            ("['hi', 'hi', 'hi', 'hi', 'hi', 'hi', 'hi', 'hi', 'hi', 'hi', ...]" ==
+            (['hi', 'hi', 'hi', 'hi', 'hi', 'hi', 'hi', 'hi', 'hi', 'hi', '...'] ==
                 payload['data']['body']['trace']['frames'][-1]['argspec'][0])
 
             or
 
-            ("['hi', 'hi', 'hi', 'hi', 'hi', 'hi', 'hi', 'hi', 'hi', 'hi', ...]" ==
+            (['hi', 'hi', 'hi', 'hi', 'hi', 'hi', 'hi', 'hi', 'hi', 'hi', '...'] ==
                     payload['data']['body']['trace']['frames'][0]['locals']['xlarge']))
 
 
@@ -1899,6 +1870,23 @@ class RollbarTest(BaseTest):
         request = Request(scope)
         user_ip = rollbar._starlette_extract_user_ip(request)
         self.assertEqual(user_ip, ip_forwarded_for.decode())
+    
+    @mock.patch('rollbar.send_payload')
+    def test_root_path(self, send_payload):
+        prev_root = rollbar.SETTINGS['root']
+        rollbar.SETTINGS['root'] = Path("/tmp")
+        try:
+            called_with('original value')
+        except:
+            rollbar.report_exc_info()
+        finally:
+            rollbar.SETTINGS['root'] = prev_root
+
+        self.assertEqual(send_payload.called, True)
+
+        payload = send_payload.call_args[0][0]
+        self.assertEqual(payload['data']['server']['root'], "/tmp")
+
 
 ### Helpers
 

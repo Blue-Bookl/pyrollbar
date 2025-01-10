@@ -1,12 +1,9 @@
 import copy
 import sys
 
-try:
-    from unittest import mock
-except ImportError:
-    import mock
+from unittest import mock
 
-import unittest2
+import unittest
 
 import rollbar
 from rollbar.lib._async import AsyncMock
@@ -15,7 +12,7 @@ from rollbar.test import BaseTest
 ALLOWED_PYTHON_VERSION = sys.version_info >= (3, 6)
 
 
-@unittest2.skipUnless(ALLOWED_PYTHON_VERSION, 'Async support requires Python3.6+')
+@unittest.skipUnless(ALLOWED_PYTHON_VERSION, 'Async support requires Python3.6+')
 class AsyncLibTest(BaseTest):
     default_settings = copy.deepcopy(rollbar.SETTINGS)
 

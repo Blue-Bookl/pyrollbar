@@ -1,10 +1,7 @@
 import importlib
 import sys
 
-try:
-    from unittest import mock
-except ImportError:
-    import mock
+from unittest import mock
 
 try:
     import fastapi
@@ -13,7 +10,7 @@ try:
 except ImportError:
     FASTAPI_INSTALLED = False
 
-import unittest2
+import unittest
 
 import rollbar
 from rollbar.test import BaseTest
@@ -21,7 +18,7 @@ from rollbar.test import BaseTest
 ALLOWED_PYTHON_VERSION = sys.version_info >= (3, 6)
 
 
-@unittest2.skipUnless(
+@unittest.skipUnless(
     FASTAPI_INSTALLED and ALLOWED_PYTHON_VERSION,
     'FastAPI LoggerMiddleware requires Python3.6+',
 )
@@ -41,6 +38,7 @@ class LoggerMiddlewareTest(BaseTest):
 
         app = FastAPI()
         app.add_middleware(LoggerMiddleware)
+        app.build_middleware_stack()
 
         rollbar.report_exc_info()
 
@@ -73,10 +71,10 @@ class LoggerMiddlewareTest(BaseTest):
             'client': ['testclient', 50000],
             'headers': [
                 (b'host', b'testserver'),
-                (b'user-agent', b'testclient'),
-                (b'accept-encoding', b'gzip, deflate'),
                 (b'accept', b'*/*'),
+                (b'accept-encoding', b'gzip, deflate'),
                 (b'connection', b'keep-alive'),
+                (b'user-agent', b'testclient'),
             ],
             'http_version': '1.1',
             'method': 'GET',
@@ -101,7 +99,7 @@ class LoggerMiddlewareTest(BaseTest):
         store_current_request.assert_called_once()
 
         scope = store_current_request.call_args[0][0]
-        self.assertDictContainsSubset(expected_scope, scope)
+        self.assertEqual(scope, {**expected_scope, **scope})
 
     def test_should_return_current_request(self):
         from fastapi import FastAPI

@@ -4,6 +4,7 @@ import inspect
 import logging
 import sys
 from unittest import mock
+from urllib.parse import urljoin
 
 try:
     import httpx
@@ -12,7 +13,7 @@ except ImportError:
 
 import rollbar
 from rollbar import DEFAULT_TIMEOUT
-from rollbar.lib import transport, urljoin
+from rollbar.lib import transport
 
 log = logging.getLogger(__name__)
 
@@ -131,14 +132,20 @@ async def _post_api_httpx(path, payload_str, access_token=None):
         'proxy_password': rollbar.SETTINGS.get('http_proxy_password'),
     }
     proxies = transport._get_proxy_cfg(proxy_cfg)
+    mounts = None
+    if proxies:
+        mounts = {
+            'http://': httpx.HTTPTransport(proxy=proxies['http']),
+            'https://': httpx.HTTPTransport(proxy=proxies['https']),
+        }
 
     url = urljoin(rollbar.SETTINGS['endpoint'], path)
     async with httpx.AsyncClient(
-        proxies=proxies, verify=rollbar.SETTINGS.get('verify_https', True)
+        mounts=mounts, verify=rollbar.SETTINGS.get('verify_https', True)
     ) as client:
         resp = await client.post(
             url,
-            data=payload_str,
+            content=payload_str,
             headers=headers,
             timeout=rollbar.SETTINGS.get('timeout', DEFAULT_TIMEOUT),
         )

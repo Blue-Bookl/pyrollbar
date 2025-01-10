@@ -2,10 +2,7 @@ import copy
 import importlib
 import sys
 
-try:
-    from unittest import mock
-except ImportError:
-    import mock
+from unittest import mock
 
 try:
     import fastapi
@@ -14,16 +11,17 @@ try:
 except ImportError:
     FASTAPI_INSTALLED = False
 
-import unittest2
+import unittest
 
 import rollbar
 from rollbar.lib._async import AsyncMock
 from rollbar.test import BaseTest
+from rollbar.test.utils import get_public_attrs
 
 ALLOWED_PYTHON_VERSION = sys.version_info >= (3, 6)
 
 
-@unittest2.skipUnless(
+@unittest.skipUnless(
     FASTAPI_INSTALLED and ALLOWED_PYTHON_VERSION, 'FastAPI requires Python3.6+'
 )
 class ReporterMiddlewareTest(BaseTest):
@@ -155,6 +153,7 @@ class ReporterMiddlewareTest(BaseTest):
 
         app = FastAPI()
         app.add_middleware(ReporterMiddleware)
+        app.build_middleware_stack()
 
         rollbar.report_exc_info()
 
@@ -258,7 +257,7 @@ class ReporterMiddlewareTest(BaseTest):
             'Failed to report asynchronously. Trying to report synchronously.'
         )
 
-    @unittest2.skipUnless(
+    @unittest.skipUnless(
         sys.version_info >= (3, 6), 'Global request access requires Python 3.6+'
     )
     @mock.patch('rollbar.contrib.starlette.middleware.store_current_request')
@@ -275,10 +274,10 @@ class ReporterMiddlewareTest(BaseTest):
             'client': ['testclient', 50000],
             'headers': [
                 (b'host', b'testserver'),
-                (b'user-agent', b'testclient'),
-                (b'accept-encoding', b'gzip, deflate'),
                 (b'accept', b'*/*'),
+                (b'accept-encoding', b'gzip, deflate'),
                 (b'connection', b'keep-alive'),
+                (b'user-agent', b'testclient'),
             ],
             'http_version': '1.1',
             'method': 'GET',
@@ -303,9 +302,9 @@ class ReporterMiddlewareTest(BaseTest):
         store_current_request.assert_called_once()
 
         scope = store_current_request.call_args[0][0]
-        self.assertDictContainsSubset(expected_scope, scope)
+        self.assertEqual(scope, {**expected_scope, **scope})
 
-    @unittest2.skipUnless(
+    @unittest.skipUnless(
         sys.version_info >= (3, 6), 'Global request access is supported in Python 3.6+'
     )
     def test_should_return_current_request(self):
@@ -327,7 +326,7 @@ class ReporterMiddlewareTest(BaseTest):
         async def read_root(original_request: Request):
             request = get_current_request()
 
-            self.assertEqual(request, original_request)
+            self.assertEqual(get_public_attrs(request), get_public_attrs(original_request))
 
         client = TestClient(app)
         client.get('/')
