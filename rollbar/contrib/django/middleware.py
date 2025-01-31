@@ -86,7 +86,6 @@ import rollbar
 from django.core.exceptions import MiddlewareNotUsed
 from django.conf import settings
 from django.http import Http404
-from six import reraise
 
 try:
     from django.urls import resolve
@@ -186,13 +185,23 @@ def _should_ignore_404(url):
     return any(p.search(url) for p in url_patterns)
 
 def _apply_sensitive_post_params(request):
-    if request.sensitive_post_parameters:
-        mutable = request.POST._mutable
-        request.POST._mutable = True
-        for param in request.sensitive_post_parameters:
-            if param in request.POST:
-                request.POST[param] = "******"
-        request.POST._mutable = mutable
+    sensitive_post_parameters = getattr(
+        request, "sensitive_post_parameters", []
+    )
+    if not sensitive_post_parameters:
+        return
+    mutable = request.POST._mutable
+    request.POST._mutable = True
+
+    if sensitive_post_parameters == "__ALL__":
+        for param in request.POST:
+            request.POST[param] = "******"
+        return
+
+    for param in sensitive_post_parameters:
+        if param in request.POST:
+            request.POST[param] = "******"
+    request.POST._mutable = mutable
 
 class RollbarNotifierMiddleware(MiddlewareMixin):
     def __init__(self, get_response=None):
@@ -311,7 +320,9 @@ class RollbarNotifierMiddlewareOnly404(MiddlewareMixin):
         try:
             if hasattr(request, '_rollbar_notifier_original_http404_exc_info'):
                 exc_type, exc_value, exc_traceback = request._rollbar_notifier_original_http404_exc_info
-                reraise(exc_type, exc_value, exc_traceback)
+                if exc_value is None:
+                    exc_value = Http404()
+                raise exc_value.with_traceback(exc_traceback)
             else:
                 raise Http404()
         except Exception as exc:

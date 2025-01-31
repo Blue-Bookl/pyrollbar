@@ -16,23 +16,18 @@ import types
 import uuid
 import wsgiref.util
 import warnings
+import queue
+from urllib.parse import parse_qs, urljoin
 
 import requests
-import six
 
-from rollbar.lib import events, filters, dict_merge, parse_qs, text, transport, urljoin, iteritems, defaultJSONEncode
+from rollbar.lib import events, filters, dict_merge, transport, defaultJSONEncode
 
 
-__version__ = '0.16.4beta'
+__version__ = '1.1.2'
 __log_name__ = 'rollbar'
 log = logging.getLogger(__log_name__)
 
-try:
-    # 2.x
-    import Queue as queue
-except ImportError:
-    # 3.x
-    import queue
 
 # import request objects from various frameworks, if available
 try:
@@ -86,7 +81,7 @@ except ImportError:
 
 try:
     from google.appengine.api.urlfetch import fetch as AppEngineFetch
-except ImportError:
+except (ImportError, KeyError):
     AppEngineFetch = None
 
 try:
@@ -273,6 +268,7 @@ SETTINGS = {
     'environment': 'production',
     'exception_level_filters': [],
     'root': None,  # root path to your code
+    'host': None,  # custom hostname of the current host
     'branch': None,  # git branch name
     'code_version': None,
     # 'blocking', 'thread' (default), 'async', 'agent', 'tornado', 'gae', 'twisted', 'httpx' or 'thread_pool'
@@ -327,6 +323,7 @@ SETTINGS = {
     'request_pool_connections': None,
     'request_pool_maxsize': None,
     'request_max_retries': None,
+    'batch_transforms': False,
 }
 
 _CURRENT_LAMBDA_CONTEXT = None
@@ -341,11 +338,13 @@ _initialized = False
 from rollbar.lib.transforms.scrub_redact import REDACT_REF
 
 from rollbar.lib import transforms
+from rollbar.lib import type_info
 from rollbar.lib.transforms.scrub import ScrubTransform
 from rollbar.lib.transforms.scruburl import ScrubUrlTransform
 from rollbar.lib.transforms.scrub_redact import ScrubRedactTransform
 from rollbar.lib.transforms.serializable import SerializableTransform
 from rollbar.lib.transforms.shortener import ShortenerTransform
+from rollbar.lib.transforms.batched import BatchedTransform
 
 
 ## public api
@@ -404,12 +403,6 @@ def init(access_token, environment='production', scrub_fields=None, url_fields=N
     #       trace frame values using the ShortReprTransform.
     _serialize_transform = SerializableTransform(safe_repr=SETTINGS['locals']['safe_repr'],
                                                  safelist_types=SETTINGS['locals']['safelisted_types'])
-    _transforms = [
-        ScrubRedactTransform(),
-        _serialize_transform,
-        ScrubTransform(suffixes=[(field,) for field in SETTINGS['scrub_fields']], redact_char='*'),
-        ScrubUrlTransform(suffixes=[(field,) for field in SETTINGS['url_fields']], params_to_scrub=SETTINGS['scrub_fields'])
-    ]
 
     # A list of key prefixes to apply our shortener transform to. The request
     # being included in the body key is old behavior and is being retained for
@@ -422,17 +415,24 @@ def init(access_token, environment='production', scrub_fields=None, url_fields=N
     ]
 
     if SETTINGS['locals']['enabled']:
-        shortener_keys.append(('body', 'trace', 'frames', '*', 'code'))
-        shortener_keys.append(('body', 'trace', 'frames', '*', 'args', '*'))
-        shortener_keys.append(('body', 'trace', 'frames', '*', 'kwargs', '*'))
-        shortener_keys.append(('body', 'trace', 'frames', '*', 'locals', '*'))
+        for prefix in (('body', 'trace'), ('body', 'trace_chain', '*')):
+            shortener_keys.append(prefix + ('frames', '*', 'code'))
+            shortener_keys.append(prefix + ('frames', '*', 'args', '*'))
+            shortener_keys.append(prefix + ('frames', '*', 'kwargs', '*'))
+            shortener_keys.append(prefix + ('frames', '*', 'locals', '*'))
 
     shortener_keys.extend(SETTINGS['shortener_keys'])
 
     shortener = ShortenerTransform(safe_repr=SETTINGS['locals']['safe_repr'],
                                    keys=shortener_keys,
                                    **SETTINGS['locals']['sizes'])
-    _transforms.append(shortener)
+    _transforms = [
+        shortener,
+        ScrubRedactTransform(),
+        _serialize_transform,
+        ScrubTransform(suffixes=[(field,) for field in SETTINGS['scrub_fields']], redact_char='*'),
+        ScrubUrlTransform(suffixes=[(field,) for field in SETTINGS['url_fields']], params_to_scrub=SETTINGS['scrub_fields'])
+    ]
     _threads = queue.Queue()
     events.reset()
     filters.add_builtin_filters(SETTINGS)
@@ -687,7 +687,7 @@ class PagedResult(Result):
 
 def _resolve_exception_class(idx, filter):
     cls, level = filter
-    if isinstance(cls, six.string_types):
+    if isinstance(cls, str):
         # Lazily resolve class name
         parts = cls.split('.')
         module = '.'.join(parts[:-1])
@@ -826,7 +826,7 @@ def _trace_data(cls, exc, trace):
         'frames': frames,
         'exception': {
             'class': getattr(cls, '__name__', cls.__class__.__name__),
-            'message': text(exc),
+            'message': str(exc),
         }
     }
 
@@ -903,7 +903,7 @@ def _build_base_data(request, level='error'):
         'level': level,
         'language': 'python %s' % '.'.join(str(x) for x in sys.version_info[:3]),
         'notifier': SETTINGS['notifier'],
-        'uuid': text(uuid.uuid4()),
+        'uuid': str(uuid.uuid4()),
     }
 
     if SETTINGS.get('code_version'):
@@ -958,9 +958,9 @@ def _build_person_data(request):
         else:
             retval = {}
             if getattr(user, 'id', None):
-                retval['id'] = text(user.id)
+                retval['id'] = str(user.id)
             elif getattr(user, 'user_id', None):
-                retval['id'] = text(user.user_id)
+                retval['id'] = str(user.user_id)
 
             # id is required, so only include username/email if we have an id
             if retval.get('id'):
@@ -977,7 +977,7 @@ def _build_person_data(request):
         user_id = user_id_prop() if callable(user_id_prop) else user_id_prop
         if not user_id:
             return None
-        return {'id': text(user_id)}
+        return {'id': str(user_id)}
 
 
 def _get_func_from_frame(frame):
@@ -990,16 +990,6 @@ def _get_func_from_frame(frame):
         func = None
 
     return func
-
-
-def _flatten_nested_lists(l):
-    ret = []
-    for x in l:
-        if isinstance(x, list):
-            ret.extend(_flatten_nested_lists(x))
-        else:
-            ret.append(x)
-    return ret
 
 
 def _add_locals_data(trace_data, exc_info):
@@ -1036,15 +1026,7 @@ def _add_locals_data(trace_data, exc_info):
             # Optionally fill in locals for this frame
             if arginfo.locals and _check_add_locals(cur_frame, frame_num, num_frames):
                 # Get all of the named args
-                #
-                # args can be a nested list of args in the case where there
-                # are anonymous tuple args provided.
-                # e.g. in Python 2 you can:
-                #   def func((x, (a, b), z)):
-                #       return x + a + b + z
-                #
-                #   func((1, (1, 2), 3))
-                argspec = _flatten_nested_lists(arginfo.args)
+                argspec = arginfo.args
 
                 if arginfo.varargs is not None:
                     varargspec = arginfo.varargs
@@ -1074,7 +1056,7 @@ def _add_locals_data(trace_data, exc_info):
             cur_frame['keywordspec'] = keywordspec
         if _locals:
             try:
-                cur_frame['locals'] = dict((k, _serialize_frame_data(v)) for k, v in iteritems(_locals))
+                cur_frame['locals'] = {k: _serialize_frame_data(v) for k, v in _locals.items()}
             except Exception:
                 log.exception('Error while serializing frame data.')
 
@@ -1082,10 +1064,11 @@ def _add_locals_data(trace_data, exc_info):
 
 
 def _serialize_frame_data(data):
-    for transform in (ScrubRedactTransform(), _serialize_transform):
-        data = transforms.transform(data, transform)
-
-    return data
+    return transforms.transform(
+        data,
+        [ScrubRedactTransform(), _serialize_transform],
+        batch_transforms=SETTINGS['batch_transforms']
+    )
 
 
 def _add_lambda_context_data(data):
@@ -1136,8 +1119,14 @@ def _check_add_locals(frame, frame_num, total_frames):
     """
     # Include the last frames locals
     # Include any frame locals that came from a file in the project's root
+    root = SETTINGS.get('root')
+    if root:
+        # coerce to string, in case root is a Path object
+        root = str(root)
+    else:
+        root = ''
     return any(((frame_num == total_frames - 1),
-                ('root' in SETTINGS and (frame.get('filename') or '').lower().startswith((SETTINGS['root'] or '').lower()))))
+                ('root' in SETTINGS and (frame.get('filename') or '').lower().startswith(root.lower()))))
 
 
 def _get_actual_request(request):
@@ -1276,11 +1265,12 @@ def _build_werkzeug_request_data(request):
         'files_keys': list(request.files.keys()),
     }
 
-    try:
-        if request.json:
-            request_data['body'] = request.json
-    except Exception:
-        pass
+    if SETTINGS['include_request_body']:
+        try:
+            if request.json:
+                request_data['body'] = request.json
+        except Exception:
+            pass
 
     return request_data
 
@@ -1308,13 +1298,15 @@ def _build_bottle_request_data(request):
         'GET': dict(request.query)
     }
 
-    if request.json:
-        try:
-            request_data['body'] = request.body.getvalue()
-        except:
-            pass
-    else:
-        request_data['POST'] = dict(request.forms)
+
+    if SETTINGS['include_request_body']:
+        if request.json:
+            try:
+                request_data['body'] = request.body.getvalue()
+            except:
+                pass
+        else:
+            request_data['POST'] = dict(request.forms)
 
     return request_data
 
@@ -1328,13 +1320,14 @@ def _build_sanic_request_data(request):
         'GET': dict(request.args)
     }
 
-    if request.json:
-        try:
-            request_data['body'] = request.json
-        except:
-            pass
-    else:
-        request_data['POST'] = request.form
+    if SETTINGS['include_request_body']:
+        if request.json:
+            try:
+                request_data['body'] = request.json
+            except:
+                pass
+        else:
+            request_data['POST'] = request.form
 
     return request_data
 
@@ -1361,20 +1354,21 @@ def _build_wsgi_request_data(request):
     if 'QUERY_STRING' in request:
         request_data['GET'] = parse_qs(request['QUERY_STRING'], keep_blank_values=True)
         # Collapse single item arrays
-        request_data['GET'] = dict((k, v[0] if len(v) == 1 else v) for k, v in request_data['GET'].items())
+        request_data['GET'] = {k: (v[0] if len(v) == 1 else v) for k, v in request_data['GET'].items()}
 
     request_data['headers'] = _extract_wsgi_headers(request.items())
 
-    try:
-        length = int(request.get('CONTENT_LENGTH', 0))
-    except ValueError:
-        length = 0
-    input = request.get('wsgi.input')
-    if length and input and hasattr(input, 'seek') and hasattr(input, 'tell'):
-        pos = input.tell()
-        input.seek(0, 0)
-        request_data['body'] = input.read(length)
-        input.seek(pos, 0)
+    if SETTINGS['include_request_body']:
+        try:
+            length = int(request.get('CONTENT_LENGTH', 0))
+        except ValueError:
+            length = 0
+        input = request.get('wsgi.input')
+        if length and input and hasattr(input, 'seek') and hasattr(input, 'tell'):
+            pos = input.tell()
+            input.seek(0, 0)
+            request_data['body'] = input.read(length)
+            input.seek(pos, 0)
 
     return request_data
 
@@ -1390,7 +1384,7 @@ def _build_starlette_request_data(request):
         'params': dict(request.path_params),
     }
 
-    if hasattr(request, '_form'):
+    if hasattr(request, '_form') and request._form is not None:
         request_data['POST'] = {
             k: v.filename if isinstance(v, UploadFile) else v
             for k, v in request._form.items()
@@ -1459,8 +1453,9 @@ def _build_server_data():
     Returns a dictionary containing information about the server environment.
     """
     # server environment
+    host = SETTINGS.get('host') or socket.gethostname()
     server_data = {
-        'host': socket.gethostname(),
+        'host': host,
         'pid': os.getpid()
     }
 
@@ -1477,10 +1472,12 @@ def _build_server_data():
 
 
 def _transform(obj, key=None):
-    for transform in _transforms:
-        obj = transforms.transform(obj, transform, key=key)
-
-    return obj
+    return transforms.transform(
+        obj,
+        _transforms,
+        key=key,
+        batch_transforms=SETTINGS['batch_transforms']
+    )
 
 
 def _build_payload(data):
@@ -1488,7 +1485,7 @@ def _build_payload(data):
     Returns the full payload as a string.
     """
 
-    for k, v in iteritems(data):
+    for k, v in data.items():
         data[k] = _transform(v, key=(k,))
 
     payload = {
@@ -1788,4 +1785,8 @@ def _wsgi_extract_user_ip(environ):
 
 
 def _starlette_extract_user_ip(request):
+    if not hasattr(request, 'client'):
+        return _extract_user_ip_from_headers(request)
+    if not hasattr(request.client, 'host'):
+        return _extract_user_ip_from_headers(request)
     return request.client.host or _extract_user_ip_from_headers(request)
